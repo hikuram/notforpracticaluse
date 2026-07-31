@@ -94,6 +94,23 @@ def set_style_font_to_meiryo(doc):
         except KeyError:
             pass
 
+def set_table_border_color(table, color="D3D3D3"):
+    """表の枠線を指定した色（HEXコード）に変更するハック"""
+    tblPr = table._tbl.tblPr
+    tblBorders = tblPr.find(qn('w:tblBorders'))
+    if tblBorders is not None:
+        tblPr.remove(tblBorders)
+        
+    new_tblBorders = OxmlElement('w:tblBorders')
+    for b in ['top', 'left', 'bottom', 'right', 'insideH', 'insideV']:
+        border = OxmlElement(f'w:{b}')
+        border.set(qn('w:val'), 'single')
+        border.set(qn('w:sz'), '4')  # 線の太さ（4 = 0.5pt）
+        border.set(qn('w:space'), '0')
+        border.set(qn('w:color'), color)
+        new_tblBorders.append(border)
+    tblPr.append(new_tblBorders)
+
 def enforce_absolute_table_width(table, left_cm, right_cm):
     table.autofit = False
     tblPr = table._tbl.tblPr
