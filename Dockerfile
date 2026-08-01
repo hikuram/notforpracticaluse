@@ -1,43 +1,43 @@
 # ==============================================================================
-# PowerPoint to Word "Ninja" Container (ONLYOFFICE Edition)
+# PowerPoint to Word "Total Victory V4" Container (ONLYOFFICE Edition)
 # ==============================================================================
-FROM ubuntu:22.04
+# Use the latest Debian Bookworm-based Python slim image
+FROM python:3.12-slim-bookworm
 
-# 対話モードを無効化
+# Disable interactive prompts during package installation
 ENV DEBIAN_FRONTEND=noninteractive
 
-# 1. 必須パッケージとフォントのインストール
-# （IPAフォントなどのOSS日本語フォントをデフォルトで入れる）
-RUN apt-get update && apt-get install -y \
+# 1. Install required packages and OSS Japanese fonts
+# (Using --no-install-recommends to exclude unnecessary dependencies and keep the image small)
+RUN apt-get update && apt-get install -y --no-install-recommends \
     wget \
-    gnupg \
     curl \
-    python3 \
-    python3-pip \
+    gnupg \
     poppler-utils \
     fonts-ipafont \
     fonts-ipaexfont \
     fontconfig \
     && rm -rf /var/lib/apt/lists/*
 
-# 2. ONLYOFFICE Document Builder のリポジトリ追加とインストール
-RUN mkdir -p -m 700 ~/.gnupg \
-    && gpg --no-default-keyring --keyring gnupg-ring:/etc/apt/trusted.gpg.d/onlyoffice.gpg --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys CB2DE8E5 \
-    && chmod 644 /etc/apt/trusted.gpg.d/onlyoffice.gpg \
+# 2. Add ONLYOFFICE repository and install Document Builder
+# (Fetching the GPG key directly from the official source for better reliability)
+RUN curl -fsSL https://download.onlyoffice.com/repo/onlyoffice.asc | gpg --dearmor > /etc/apt/trusted.gpg.d/onlyoffice.gpg \
     && echo "deb https://download.onlyoffice.com/repo/debian squeeze main" | tee /etc/apt/sources.list.d/onlyoffice.list \
     && apt-get update \
-    && apt-get install -y onlyoffice-documentbuilder \
+    && apt-get install -y --no-install-recommends onlyoffice-documentbuilder \
     && rm -rf /var/lib/apt/lists/*
 
-# 3. Pythonライブラリのインストール
-RUN pip3 install --no-cache-dir \
+# 3. Install Python dependencies
+# (Using the built-in pip provided by the official Python image)
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir \
     python-pptx \
     python-docx \
     Pillow \
     pdf2image
 
-# 作業ディレクトリの設定
+# Set the working directory
 WORKDIR /workspace
 
-# デフォルトのコマンドをbashに設定
+# Set bash as the default command
 CMD ["/bin/bash"]
