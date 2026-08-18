@@ -375,7 +375,7 @@ try {
         throw "処理中に出力先ファイルが作成されました。上書きせず終了します: $DestinationOutput"
     }
     $temporaryDestination = Join-Path $DestinationDirectory (
-        ".{0}.{1}.tmp" -f $OutputName, [Guid]::NewGuid().ToString("N")
+        "{0}.{1}.tmp" -f $OutputName, [Guid]::NewGuid().ToString("N")
     )
     $backupDestination = $null
     try {
