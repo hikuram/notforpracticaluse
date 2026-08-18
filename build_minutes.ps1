@@ -93,13 +93,25 @@ function Invoke-LoggedNative {
 
         [string[]]$ArgumentList = @(),
 
-        [int[]]$SuccessExitCodes = @(0)
+        [int[]]$SuccessExitCodes = @(0),
+
+        [System.Text.Encoding]$NativeOutputEncoding = $null
     )
 
     Write-Log ("実行: {0} {1}" -f $FilePath, ($ArgumentList -join " "))
 
     $previousErrorActionPreference = $ErrorActionPreference
+    $previousConsoleOutputEncoding = $null
+    $consoleEncodingChanged = $false
     try {
+        # Windows PowerShell decodes native stdout/stderr using the console output
+        # encoding. Override it only for commands whose output encoding is known.
+        if ($null -ne $NativeOutputEncoding) {
+            $previousConsoleOutputEncoding = [Console]::OutputEncoding
+            [Console]::OutputEncoding = $NativeOutputEncoding
+            $consoleEncodingChanged = $true
+        }
+
         # Native stderr is captured as output. The process exit code is checked
         # explicitly so normal diagnostic messages do not become terminating errors.
         $ErrorActionPreference = "Continue"
@@ -107,6 +119,9 @@ function Invoke-LoggedNative {
         $exitCode = $LASTEXITCODE
     }
     finally {
+        if ($consoleEncodingChanged) {
+            [Console]::OutputEncoding = $previousConsoleOutputEncoding
+        }
         $ErrorActionPreference = $previousErrorActionPreference
     }
 
@@ -344,7 +359,10 @@ try {
     }
     $podmanArguments += @($PowerPointFiles.Name)
 
-    Invoke-LoggedNative -FilePath "podman.exe" -ArgumentList $podmanArguments | Out-Null
+    Invoke-LoggedNative `
+        -FilePath "podman.exe" `
+        -ArgumentList $podmanArguments `
+        -NativeOutputEncoding ([System.Text.Encoding]::UTF8) | Out-Null
 
     $LocalOutput = Join-Path $OutputDirectory $OutputName
     if (-not (Test-Path -LiteralPath $LocalOutput -PathType Leaf)) {

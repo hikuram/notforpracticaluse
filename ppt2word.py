@@ -49,6 +49,27 @@ SLIDE_IMAGE_CELL_SIDE_MARGIN_CM = 0.02
 SLIDE_IMAGE_CELL_VERTICAL_MARGIN_CM = 0.02
 SLIDE_ROW_MIN_HEIGHT_CM = 6.65
 
+
+def sanitize_xml_text(text: str) -> str:
+    """Normalize PowerPoint text so it is safe for WordprocessingML."""
+    if not text:
+        return ""
+
+    # python-pptx represents PowerPoint soft line breaks as vertical tabs.
+    text = text.replace("\v", "\n")
+
+    def is_valid_xml_char(character: str) -> bool:
+        codepoint = ord(character)
+        return (
+            codepoint in (0x09, 0x0A, 0x0D)
+            or 0x20 <= codepoint <= 0xD7FF
+            or 0xE000 <= codepoint <= 0xFFFD
+            or 0x10000 <= codepoint <= 0x10FFFF
+        )
+
+    return "".join(character for character in text if is_valid_xml_char(character))
+
+
 def find_sibling_pdf(ppt_path: Path) -> Path:
     """Return the PDF beside *ppt_path*, matching the stem case-insensitively."""
     direct_candidate = ppt_path.with_suffix(".pdf")
@@ -149,9 +170,9 @@ def is_slide_visible(slide) -> bool:
 
 
 def iter_text_frame_paragraphs(text_frame) -> Iterator[str]:
-    """Yield non-empty paragraph text while preserving text across runs."""
+    """Yield non-empty, XML-safe paragraph text while preserving run joins."""
     for paragraph in text_frame.paragraphs:
-        text = paragraph.text.strip()
+        text = sanitize_xml_text(paragraph.text).strip()
         if text:
             yield text
 

@@ -12,7 +12,24 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import ppt2word
 
 
+class XmlTextSanitizationTests(unittest.TestCase):
+    def test_replaces_soft_breaks_and_removes_invalid_xml_characters(self):
+        text = "A\x00B\vC\x08D\tE\rF\nG"
+        self.assertEqual("AB\nCD\tE\rF\nG", ppt2word.sanitize_xml_text(text))
+
+
 class TextExtractionTests(unittest.TestCase):
+    def test_extracts_soft_break_as_newline(self):
+        presentation = Presentation()
+        slide = presentation.slides.add_slide(presentation.slide_layouts[6])
+        text_box = slide.shapes.add_textbox(
+            Inches(0.5), Inches(0.5), Inches(4.0), Inches(1.0)
+        )
+        text_box.text_frame.text = "First\vSecond"
+
+        extracted = ppt2word.extract_text_from_slide(slide)
+        self.assertEqual("First\nSecond", extracted)
+
     def test_extracts_runs_tables_and_group_shapes(self):
         presentation = Presentation()
         slide = presentation.slides.add_slide(presentation.slide_layouts[6])
