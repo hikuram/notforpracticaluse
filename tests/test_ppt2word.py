@@ -19,16 +19,78 @@ class XmlTextSanitizationTests(unittest.TestCase):
 
 
 class TextExtractionTests(unittest.TestCase):
-    def test_extracts_soft_break_as_newline(self):
+    def test_compacts_text_box_breaks_to_tabs(self):
         presentation = Presentation()
         slide = presentation.slides.add_slide(presentation.slide_layouts[6])
         text_box = slide.shapes.add_textbox(
             Inches(0.5), Inches(0.5), Inches(4.0), Inches(1.0)
         )
         text_box.text_frame.text = "First\vSecond"
+        text_box.text_frame.add_paragraph().text = "Third"
 
         extracted = ppt2word.extract_text_from_slide(slide)
-        self.assertEqual("First\nSecond", extracted)
+        self.assertEqual("First\tSecond\tThird", extracted)
+
+    def test_appends_hyperlink_target_after_linked_runs(self):
+        presentation = Presentation()
+        slide = presentation.slides.add_slide(presentation.slide_layouts[6])
+        text_box = slide.shapes.add_textbox(
+            Inches(0.5), Inches(0.5), Inches(4.0), Inches(1.0)
+        )
+        paragraph = text_box.text_frame.paragraphs[0]
+        first_run = paragraph.add_run()
+        first_run.text = "Open"
+        first_run.hyperlink.address = "https://example.com/docs"
+        second_run = paragraph.add_run()
+        second_run.text = "AI"
+        second_run.hyperlink.address = "https://example.com/docs"
+        paragraph.add_run().text = " guide"
+
+        extracted = ppt2word.extract_text_from_slide(slide)
+        self.assertEqual(
+            "OpenAI（https://example.com/docs） guide",
+            extracted,
+        )
+
+    def test_appends_hyperlink_target_inside_table_cell(self):
+        presentation = Presentation()
+        slide = presentation.slides.add_slide(presentation.slide_layouts[6])
+        table_shape = slide.shapes.add_table(
+            1, 2, Inches(0.5), Inches(0.5), Inches(6.0), Inches(1.0)
+        )
+        left = table_shape.table.cell(0, 0)
+        paragraph = left.text_frame.paragraphs[0]
+        run = paragraph.add_run()
+        run.text = "Spec"
+        run.hyperlink.address = "https://example.com/spec"
+        table_shape.table.cell(0, 1).text = "OK"
+
+        extracted = ppt2word.extract_text_from_slide(slide)
+        self.assertEqual(
+            "Spec（https://example.com/spec）\tOK",
+            extracted,
+        )
+
+    def test_compacts_table_cells_and_rows(self):
+        presentation = Presentation()
+        slide = presentation.slides.add_slide(presentation.slide_layouts[6])
+        table_shape = slide.shapes.add_table(
+            2, 3, Inches(0.5), Inches(0.5), Inches(6.0), Inches(2.0)
+        )
+        table = table_shape.table
+        table.cell(0, 0).text = "Item"
+        table.cell(0, 1).text = "Value"
+        table.cell(0, 2).text = "Judge"
+        table.cell(1, 0).text = "A\vdetail"
+        table.cell(1, 0).text_frame.add_paragraph().text = "note"
+        table.cell(1, 1).text = "10"
+        table.cell(1, 2).text = "OK"
+
+        extracted = ppt2word.extract_text_from_slide(slide)
+        self.assertEqual(
+            "Item\tValue\tJudge\nA detail note\t10\tOK",
+            extracted,
+        )
 
     def test_extracts_runs_tables_and_group_shapes(self):
         presentation = Presentation()
