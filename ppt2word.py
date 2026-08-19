@@ -169,12 +169,93 @@ def is_slide_visible(slide) -> bool:
     return show not in {"0", "false"}
 
 
-def iter_text_frame_paragraphs(text_frame) -> Iterator[str]:
-    """Yield non-empty, XML-safe paragraph text while preserving run joins."""
+def normalize_extracted_text(text: str, *, line_break_separator: str) -> str:
+    """Make extracted text XML-safe and compact internal line breaks."""
+    text = sanitize_xml_text(text)
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    parts = [part.strip() for part in text.split("\n")]
+    return line_break_separator.join(part for part in parts if part)
+
+
+def get_paragraph_text(paragraph, *, line_break_separator: str) -> str:
+    """Return compact paragraph text with run hyperlink targets appended."""
+    run_by_element = {run._r: run for run in paragraph.runs}
+    chunks: list[str] = []
+    active_hyperlink: str | None = None
+
+    def flush_hyperlink() -> None:
+        nonlocal active_hyperlink
+        if active_hyperlink:
+            chunks.append(f"（{active_hyperlink}）")
+            active_hyperlink = None
+
+    for element in paragraph._p.content_children:
+        local_name = element.tag.rsplit("}", 1)[-1]
+
+        if local_name == "r":
+            run = run_by_element.get(element)
+            hyperlink = ""
+            if run is not None:
+                hyperlink = sanitize_xml_text(run.hyperlink.address or "").strip()
+
+            if active_hyperlink and hyperlink != active_hyperlink:
+                flush_hyperlink()
+
+            chunks.append(element.text or "")
+            if hyperlink:
+                active_hyperlink = hyperlink
+            continue
+
+        flush_hyperlink()
+        if local_name == "br":
+            chunks.append("\n")
+        else:
+            chunks.append(element.text or "")
+
+    flush_hyperlink()
+    return normalize_extracted_text(
+        "".join(chunks),
+        line_break_separator=line_break_separator,
+    )
+
+
+def get_text_frame_text(
+    text_frame,
+    *,
+    paragraph_separator: str = "\t",
+    line_break_separator: str = "\t",
+) -> str:
+    """Return compact text from one text frame while preserving run joins."""
+    paragraphs: list[str] = []
     for paragraph in text_frame.paragraphs:
-        text = sanitize_xml_text(paragraph.text).strip()
+        text = get_paragraph_text(
+            paragraph,
+            line_break_separator=line_break_separator,
+        )
         if text:
-            yield text
+            paragraphs.append(text)
+    return paragraph_separator.join(paragraphs)
+
+
+def iter_table_text(table) -> Iterator[str]:
+    """Yield one compact searchable line per PowerPoint table row."""
+    seen_cells: set[object] = set()
+    for row in table.rows:
+        cell_texts: list[str] = []
+        for cell in row.cells:
+            cell_key = cell._tc
+            if cell_key in seen_cells:
+                continue
+            seen_cells.add(cell_key)
+            cell_texts.append(
+                get_text_frame_text(
+                    cell.text_frame,
+                    paragraph_separator=" ",
+                    line_break_separator=" ",
+                )
+            )
+        if any(cell_texts):
+            yield "\t".join(cell_texts).strip("\t")
 
 
 def iter_shape_text(shape) -> Iterator[str]:
@@ -185,25 +266,21 @@ def iter_shape_text(shape) -> Iterator[str]:
         return
 
     if getattr(shape, "has_table", False):
-        seen_cells: set[int] = set()
-        for row in shape.table.rows:
-            for cell in row.cells:
-                cell_key = id(cell._tc)
-                if cell_key in seen_cells:
-                    continue
-                seen_cells.add(cell_key)
-                yield from iter_text_frame_paragraphs(cell.text_frame)
+        yield from iter_table_text(shape.table)
+        return
 
     if getattr(shape, "has_text_frame", False):
-        yield from iter_text_frame_paragraphs(shape.text_frame)
+        text = get_text_frame_text(shape.text_frame)
+        if text:
+            yield text
 
 
 def extract_text_from_slide(slide) -> str:
-    """Extract searchable slide text in shape order without altering run joins."""
-    paragraphs: list[str] = []
+    """Extract compact searchable slide text in shape order."""
+    shape_texts: list[str] = []
     for shape in slide.shapes:
-        paragraphs.extend(iter_shape_text(shape))
-    return "\n".join(paragraphs)
+        shape_texts.extend(iter_shape_text(shape))
+    return "\n".join(shape_texts)
 
 
 def get_or_add_child(parent, tag: str) -> OxmlElement:
