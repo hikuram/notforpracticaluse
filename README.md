@@ -6,7 +6,7 @@ The workflow deliberately separates PowerPoint rendering from document assembly:
 
 1. Microsoft PowerPoint on the Windows host converts each presentation to PDF.
 2. A Podman container rasterizes the PDF pages, extracts searchable text from the original PPTX/PPTM files, and builds the integrated DOCX.
-3. `build_minutes.ps1` copies the source folder to an isolated local job directory, runs both stages, and returns the completed DOCX to the requested destination.
+3. `build_minutes.ps1` copies the source folder to an isolated local job directory, runs both stages, returns the completed DOCX to the requested destination, optionally exports the generated PDFs, and removes the local job directory when processing ends.
 
 The tool is intended as a practical bridge for meetings that already depend on PowerPoint. It is not intended to recommend PowerPoint as the primary format for long-term knowledge management.
 
@@ -15,7 +15,7 @@ The tool is intended as a practical bridge for meetings that already depend on P
 - Windows with Microsoft PowerPoint
 - Windows PowerShell 5.1 or PowerShell 7
 - Windows Script Host (`cscript.exe`)
-- Podman Desktop
+- Podman Desktop or another Windows-accessible Podman environment
 
 Build the container image once from the repository directory:
 
@@ -31,6 +31,8 @@ The container requires at least the following tested package versions and permit
 - `python-docx>=1.2.0`
 - `python-pptx>=1.0.2`
 - `pip>=26.2`
+
+Container-platform installation and configuration are outside the scope of this repository's normal-use instructions.
 
 ## Recommended workflow
 
@@ -55,6 +57,32 @@ When `-Destination` is omitted, the completed DOCX is copied back to the source 
 
 `-OutputName` is optional. Specify it when an explicit, portable English filename is preferred.
 
+### Export the PowerPoint-generated PDFs
+
+The PDFs created by Microsoft PowerPoint can be useful as reusable meeting artifacts. Add `-ExportPdf` to keep copies as formal output:
+
+```powershell
+.\build_minutes.ps1 `
+  -Source "\\fileserver\shared\meeting-materials" `
+  -Destination "\\fileserver\shared\meeting-minutes" `
+  -OutputName "meeting_minutes_base.docx" `
+  -ExportPdf
+```
+
+The PDFs are written to a `PDF` subdirectory under the selected destination:
+
+```text
+meeting-minutes\
+  meeting_minutes_base.docx
+  PDF\
+    01_topic-a.pdf
+    02_topic-b.pdf
+```
+
+When `-Destination` is omitted, the `PDF` directory is created under `-Source`.
+
+Exported PDFs are treated as persistent output. The copies inside the local working job are still removed at the end of processing.
+
 ## Launcher behavior
 
 The launcher performs the following steps:
@@ -68,7 +96,8 @@ The launcher performs the following steps:
 7. Confirms that every presentation has a same-stem PDF.
 8. Mounts the local input directory read-only and the local output directory read-write into the Podman container.
 9. Copies the completed DOCX to a temporary destination file and safely swaps it into place. With `-Force`, the previous DOCX is kept as a temporary backup until the replacement succeeds.
-10. Preserves the local job directory and `process.log` for inspection unless cleanup is explicitly requested.
+10. With `-ExportPdf`, publishes the generated PDFs to the destination's `PDF` subdirectory using the same temporary-copy and replacement approach.
+11. Removes the entire local job directory in a `finally` cleanup step, whether the processing succeeds or fails.
 
 The default local job root is:
 
@@ -76,7 +105,7 @@ The default local job root is:
 %LOCALAPPDATA%\ppt2word\jobs
 ```
 
-A job directory has the following structure:
+A transient job directory has the following structure while processing is running:
 
 ```text
 <timestamp>_<pid>_<source-folder>\
@@ -88,11 +117,9 @@ A job directory has the following structure:
   process.log
 ```
 
-Failed jobs are always retained. To delete a successful job immediately, add:
+The job directory, copied input files, generated PDFs, intermediate images, generated DOCX copy, and `process.log` are all removed when the launcher finishes.
 
-```powershell
--CleanupOnSuccess
-```
+If cleanup itself fails, the launcher reports the remaining job path, returns a non-zero exit code, and asks the user to remove the directory manually. Cleanup failure is therefore not treated as a successful run.
 
 ## Useful launcher options
 
@@ -100,28 +127,48 @@ Failed jobs are always retained. To delete a successful job immediately, add:
 -Destination <folder>       Completed DOCX destination; defaults to Source
 -OutputName <name.docx>     Output file name
 -ImageName <name>           Podman image name; default: ppt2word
--JobRoot <folder>           Local job root
+-JobRoot <folder>           Local transient job root
 -Dpi <integer>              PDF rasterization resolution; default: 300
 -JpegQuality <1-95>         Intermediate JPEG quality; default: 85
--Force                      Replace an existing destination DOCX
--CleanupOnSuccess           Delete the local job after successful delivery
--KeepImages                 Preserve temporary slide JPEGs in the job output
+-Force                      Replace existing destination DOCX/PDF output
+-ExportPdf                  Also save generated PDFs under Destination\PDF
 ```
 
-Example with overwrite and cleanup:
+Example with PDF export and replacement of existing output:
 
 ```powershell
 .\build_minutes.ps1 `
   -Source "\\fileserver\shared\meeting-materials" `
   -Destination "\\fileserver\shared\meeting-minutes" `
   -OutputName "meeting_minutes_base.docx" `
-  -Force `
-  -CleanupOnSuccess
+  -ExportPdf `
+  -Force
 ```
+
+Without `-Force`, the launcher refuses to replace an existing destination DOCX. When `-ExportPdf` is used, it also refuses to replace same-name PDFs already present in the destination `PDF` directory.
+
+## Temporary-data handling
+
+The normal launcher intentionally uses a local copy rather than processing the source folder in place. This protects the original PowerPoint files and avoids directly replacing same-name PDFs that may already exist beside them.
+
+Because the copied source tree may contain confidential or sensitive material, local job retention is not an optional normal-use feature. `build_minutes.ps1` removes its local job on both success and failure.
+
+Important points:
+
+- Source PPTX/PPTM files are not directly modified by the normal launcher.
+- Same-name PDFs generated during processing exist only in the local job unless `-ExportPdf` is specified.
+- `process.log` is temporary and is deleted with the job.
+- The Podman container is run with `--rm` and is removed after execution.
+- A cleanup failure is surfaced as an error rather than silently ignored.
+- Files intentionally published to `-Destination`, including PDFs requested with `-ExportPdf`, are persistent output and are not deleted by job cleanup.
+
+Normal filesystem deletion is not the same as physical secure erasure of storage media. Device-level protection, full-disk encryption, backup policy, and secure disposal remain responsibilities of the host environment.
 
 ## Manual workflow
 
 The two processing stages can also be run separately for troubleshooting.
+
+**Warning:** the manual workflow bypasses the launcher's isolated-job lifecycle and automatic cleanup. Files created manually remain wherever the commands write them and must be managed or deleted by the user.
 
 ### Convert PowerPoint files to PDF
 
@@ -129,7 +176,7 @@ The two processing stages can also be run separately for troubleshooting.
 cscript.exe //nologo .\pptx_to_pdf.js .\meeting-a.pptx .\meeting-b.pptx
 ```
 
-Each PDF is written next to its source presentation. An existing same-name PDF is replaced.
+Each PDF is written next to its source presentation. An existing same-name PDF is replaced. For normal use, prefer `build_minutes.ps1`, which performs this conversion only on the local copy.
 
 ### Generate the Word document
 
@@ -176,6 +223,8 @@ The processing retains the following behavior:
 - East Asian font assignment for generated content
 - Direct OOXML edits for table layout, borders, and `w15:collapsed`
 
+Intermediate slide images are implementation artifacts and are not retained after the normal launcher finishes.
+
 ## Privacy and publication checklist
 
 Before publishing a fork or an internal customization, review more than just source-code text. Office templates can retain identifying information in visible fields and document metadata.
@@ -187,7 +236,7 @@ At minimum, check:
 - Word core properties such as author and last modified by
 - Word extended properties such as company
 - template form fields and pre-filled participant lists
-- sample files, logs, generated documents, and screenshots
+- sample files, generated documents, exported PDFs, and screenshots
 
 The sample template included in this repository is intentionally generic so that the repository can be shared without exposing organization-specific background information.
 
