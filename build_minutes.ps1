@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
 NASまたはローカルの資料フォルダから統合議事録ベースを生成します。
 
@@ -6,12 +6,14 @@ NASまたはローカルの資料フォルダから統合議事録ベースを�
 資料フォルダをローカルジョブへコピーし、Windows PowerPointによるPDF変換、
 PodmanコンテナによるDOCX生成、指定先への完成ファイル返却を順に実行します。
 PowerPointファイルは入力フォルダ直下のPPTX/PPTMを対象とします。
+-ExportPdfを指定した場合は、生成したPDFも出力先のPDFサブフォルダへ保存します。
+ローカルジョブは成功・失敗を問わず処理終了時に削除します。
 
 .EXAMPLE
 .\build_minutes.ps1 -Source "\\nas\share\materials" -Destination "\\nas\share\minutes"
 
 .EXAMPLE
-.\build_minutes.ps1 -Source "C:\work\materials" -Force -CleanupOnSuccess
+.\build_minutes.ps1 -Source "C:\work\materials" -Force -ExportPdf
 #>
 [CmdletBinding()]
 param(
@@ -38,9 +40,7 @@ param(
 
     [switch]$Force,
 
-    [switch]$CleanupOnSuccess,
-
-    [switch]$KeepImages
+    [switch]$ExportPdf
 )
 
 Set-StrictMode -Version 2.0
@@ -53,6 +53,7 @@ $LogPath = $null
 $JobDirectory = $null
 $Completed = $false
 $CurrentStage = "初期化"
+$ExitCode = 1
 
 function Get-AbsolutePath {
     param(
@@ -235,6 +236,21 @@ try {
         throw "出力先が既に存在します。上書きする場合は-Forceを指定してください: $DestinationOutput"
     }
 
+    $PdfDestinationDirectory = $null
+    if ($ExportPdf) {
+        $PdfDestinationDirectory = Join-Path $DestinationDirectory "PDF"
+        if (Test-Path -LiteralPath $PdfDestinationDirectory -PathType Leaf) {
+            throw "PDF出力先と同名のファイルが存在します: $PdfDestinationDirectory"
+        }
+
+        foreach ($sourceFile in $SourcePowerPointFiles) {
+            $pdfDestination = Join-Path $PdfDestinationDirectory ($sourceFile.BaseName + ".pdf")
+            if ((Test-Path -LiteralPath $pdfDestination) -and (-not $Force)) {
+                throw "PDF出力先が既に存在します。上書きする場合は-Forceを指定してください: $pdfDestination"
+            }
+        }
+    }
+
     if ([string]::IsNullOrWhiteSpace($JobRoot)) {
         if (-not [string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
             $JobRoot = Join-Path $env:LOCALAPPDATA "ppt2word\jobs"
@@ -354,9 +370,6 @@ try {
         "--jpeg-quality", [string]$JpegQuality,
         "-o", $containerOutputPath
     )
-    if ($KeepImages) {
-        $podmanArguments += "--keep-images"
-    }
     $podmanArguments += @($PowerPointFiles.Name)
 
     Invoke-LoggedNative `
@@ -436,19 +449,91 @@ try {
         }
     }
 
-    $Completed = $true
-    Write-Log "完了: $DestinationOutput"
+    if ($ExportPdf) {
+        $CurrentStage = "PDFの返却"
+        Write-Log "生成PDFを出力先のPDFフォルダへコピーします。"
+        New-Item -ItemType Directory -Path $PdfDestinationDirectory -Force | Out-Null
 
-    if ($CleanupOnSuccess) {
-        Write-Log "正常終了したローカルジョブを削除します。"
-        Remove-Item -LiteralPath $JobDirectory -Recurse -Force
-        $LogPath = $null
-        Write-Host ("完了: {0}" -f $DestinationOutput)
-        Write-Host ("削除済みジョブ: {0}" -f $JobDirectory)
+        foreach ($presentation in $PowerPointFiles) {
+            $localPdf = Join-Path $InputDirectory ($presentation.BaseName + ".pdf")
+            $destinationPdf = Join-Path $PdfDestinationDirectory ($presentation.BaseName + ".pdf")
+
+            if ((Test-Path -LiteralPath $destinationPdf) -and (-not $Force)) {
+                throw "処理中にPDF出力先が作成されました。上書きせず終了します: $destinationPdf"
+            }
+
+            $temporaryPdf = Join-Path $PdfDestinationDirectory (
+                "{0}.{1}.tmp" -f ($presentation.BaseName + ".pdf"), [Guid]::NewGuid().ToString("N")
+            )
+            $backupPdf = $null
+            try {
+                Copy-Item -LiteralPath $localPdf -Destination $temporaryPdf -Force
+
+                $localPdfLength = (Get-Item -LiteralPath $localPdf).Length
+                $temporaryPdfLength = (Get-Item -LiteralPath $temporaryPdf).Length
+                if ($localPdfLength -ne $temporaryPdfLength) {
+                    throw "PDF一時コピーのファイルサイズが一致しません: $temporaryPdf"
+                }
+
+                if (Test-Path -LiteralPath $destinationPdf) {
+                    if (-not $Force) {
+                        throw "処理中にPDF出力先が作成されました。上書きせず終了します: $destinationPdf"
+                    }
+
+                    $backupPdf = Join-Path $PdfDestinationDirectory (
+                        "{0}.{1}.bak" -f ($presentation.BaseName + ".pdf"), [Guid]::NewGuid().ToString("N")
+                    )
+                    Move-Item -LiteralPath $destinationPdf -Destination $backupPdf
+                }
+
+                try {
+                    Move-Item -LiteralPath $temporaryPdf -Destination $destinationPdf
+                }
+                catch {
+                    $publishPdfError = $_
+                    if (($null -ne $backupPdf) -and
+                        (Test-Path -LiteralPath $backupPdf) -and
+                        (-not (Test-Path -LiteralPath $destinationPdf))) {
+                        try {
+                            Move-Item -LiteralPath $backupPdf -Destination $destinationPdf
+                            $backupPdf = $null
+                        }
+                        catch {
+                            Write-Log "警告: 既存PDFの自動復元に失敗しました。バックアップを保持します: $backupPdf"
+                        }
+                    }
+                    throw $publishPdfError
+                }
+
+                if (($null -ne $backupPdf) -and (Test-Path -LiteralPath $backupPdf)) {
+                    try {
+                        Remove-Item -LiteralPath $backupPdf -Force
+                        $backupPdf = $null
+                    }
+                    catch {
+                        Write-Log "警告: 置換前PDFのバックアップを削除できませんでした: $backupPdf"
+                    }
+                }
+            }
+            finally {
+                if (Test-Path -LiteralPath $temporaryPdf) {
+                    Remove-Item -LiteralPath $temporaryPdf -Force -ErrorAction SilentlyContinue
+                }
+                if (($null -ne $backupPdf) -and (Test-Path -LiteralPath $backupPdf)) {
+                    Write-Log "置換前PDFのバックアップを保持しています: $backupPdf"
+                }
+            }
+
+            Write-Log "PDF保存: $destinationPdf"
+        }
     }
-    else {
-        Write-Log "ローカルジョブは確認用に保持しています。"
-        Write-Host ("ジョブ保存先: {0}" -f $JobDirectory)
+
+    $Completed = $true
+    $ExitCode = 0
+    Write-Log "完了: $DestinationOutput"
+    Write-Host ("完了: {0}" -f $DestinationOutput)
+    if ($ExportPdf) {
+        Write-Host ("PDF保存先: {0}" -f $PdfDestinationDirectory)
     }
 }
 catch {
@@ -479,15 +564,32 @@ catch {
         if (-not [string]::IsNullOrWhiteSpace($scriptStackTrace)) {
             Write-Log ("スタック: " + ($scriptStackTrace -replace "[\r\n]+", " | "))
         }
-        Write-Log "調査用にローカルジョブを保持します: $JobDirectory"
+        Write-Log "ローカルジョブは終了処理で削除します: $JobDirectory"
     }
 
     [Console]::Error.WriteLine("失敗した段階: {0}" -f $CurrentStage)
     [Console]::Error.WriteLine("エラー: {0}" -f $message)
-    exit 1
+    $ExitCode = 1
+}
+finally {
+    if (($null -ne $JobDirectory) -and
+        (Test-Path -LiteralPath $JobDirectory -PathType Container)) {
+        if ($null -ne $LogPath) {
+            Write-Log "ローカル一時ジョブを削除します。"
+        }
+
+        # process.logもジョブ内にあるため、削除開始後はファイルログへ書き込まない。
+        $LogPath = $null
+        try {
+            Remove-Item -LiteralPath $JobDirectory -Recurse -Force -ErrorAction Stop
+            Write-Host ("ローカル一時ファイルを削除しました: {0}" -f $JobDirectory)
+        }
+        catch {
+            [Console]::Error.WriteLine("警告: ローカル一時ファイルの削除に失敗しました: {0}" -f $JobDirectory)
+            [Console]::Error.WriteLine("手動で削除してください: {0}" -f $_.Exception.Message)
+            $ExitCode = 1
+        }
+    }
 }
 
-if ($Completed) {
-    exit 0
-}
-exit 1
+exit $ExitCode
