@@ -14,6 +14,9 @@ PowerPointファイルは入力フォルダ直下のPPTX/PPTMを対象としま�
 
 .EXAMPLE
 .\build_minutes.ps1 -Source "C:\work\materials" -Force -ExportPdf
+
+.EXAMPLE
+.\build_minutes.ps1 -Source "C:\work\materials" -Template "C:\work\templates\meeting_template.docx"
 #>
 [CmdletBinding()]
 param(
@@ -31,6 +34,8 @@ param(
     [string]$ImageName = "ppt2word",
 
     [string]$JobRoot,
+
+    [string]$Template,
 
     [ValidateRange(1, 1200)]
     [int]$Dpi = 300,
@@ -51,6 +56,9 @@ $ScriptDirectory = Split-Path -Parent $MyInvocation.MyCommand.Path
 $PdfExporter = Join-Path $ScriptDirectory "pptx_to_pdf.js"
 $LogPath = $null
 $JobDirectory = $null
+$TemplatePath = $null
+$TemplateDirectory = $null
+$LocalTemplatePath = $null
 $Completed = $false
 $CurrentStage = "初期化"
 $ExitCode = 1
@@ -211,6 +219,16 @@ try {
         throw "-OutputName は.docxファイル名で指定してください: $OutputName"
     }
 
+    if (-not [string]::IsNullOrWhiteSpace($Template)) {
+        $TemplatePath = Get-AbsolutePath -Path $Template -MustExist
+        if (-not (Test-Path -LiteralPath $TemplatePath -PathType Leaf)) {
+            throw "-Template にはDOCXファイルを指定してください: $TemplatePath"
+        }
+        if ([System.IO.Path]::GetExtension($TemplatePath).ToLowerInvariant() -ne ".docx") {
+            throw "-Template は.docxファイルで指定してください: $TemplatePath"
+        }
+    }
+
     $SourceDirectory = Get-AbsolutePath -Path $Source -MustExist
     if (-not (Test-Path -LiteralPath $SourceDirectory -PathType Container)) {
         throw "-Source にはフォルダを指定してください: $SourceDirectory"
@@ -283,12 +301,20 @@ try {
     $OutputDirectory = Join-Path $JobDirectory "output"
     New-Item -ItemType Directory -Path $InputDirectory -Force | Out-Null
     New-Item -ItemType Directory -Path $OutputDirectory -Force | Out-Null
+    if ($null -ne $TemplatePath) {
+        $TemplateDirectory = Join-Path $JobDirectory "template"
+        New-Item -ItemType Directory -Path $TemplateDirectory -Force | Out-Null
+        $LocalTemplatePath = Join-Path $TemplateDirectory "template.docx"
+    }
     $LogPath = Join-Path $JobDirectory "process.log"
     New-Item -ItemType File -Path $LogPath -Force | Out-Null
 
     Write-Log "処理を開始します。"
     Write-Log "入力元: $SourceDirectory"
     Write-Log "出力先: $DestinationOutput"
+    if ($null -ne $TemplatePath) {
+        Write-Log "テンプレート: $TemplatePath"
+    }
     Write-Log "ローカルジョブ: $JobDirectory"
 
     Assert-CommandAvailable -Name "robocopy.exe"
@@ -297,6 +323,9 @@ try {
 
     Assert-SafeMountPath -Path $InputDirectory
     Assert-SafeMountPath -Path $OutputDirectory
+    if ($null -ne $TemplateDirectory) {
+        Assert-SafeMountPath -Path $TemplateDirectory
+    }
 
     $imageStatus = Invoke-LoggedNative `
         -FilePath "podman.exe" `
@@ -323,6 +352,23 @@ try {
     $CurrentStage = "入力資料のコピー"
     Invoke-LoggedNative -FilePath "robocopy.exe" -ArgumentList $robocopyArguments -SuccessExitCodes (0..7) | Out-Null
     Write-Log "入力資料のコピーが完了しました。"
+
+    if ($null -ne $TemplatePath) {
+        $CurrentStage = "テンプレートのコピー"
+        Write-Log "指定テンプレートをローカルジョブへコピーします。"
+        Copy-Item -LiteralPath $TemplatePath -Destination $LocalTemplatePath -Force
+
+        if (-not (Test-Path -LiteralPath $LocalTemplatePath -PathType Leaf)) {
+            throw "テンプレートのローカルコピーに失敗しました: $LocalTemplatePath"
+        }
+
+        $templateSourceLength = (Get-Item -LiteralPath $TemplatePath).Length
+        $templateLocalLength = (Get-Item -LiteralPath $LocalTemplatePath).Length
+        if ($templateSourceLength -ne $templateLocalLength) {
+            throw "テンプレートのローカルコピー後のファイルサイズが一致しません: $LocalTemplatePath"
+        }
+        Write-Log "テンプレートのコピーが完了しました。"
+    }
 
     $CurrentStage = "コピー後のPowerPointファイル検査"
     Write-Log "コピー後のPowerPointファイル一覧を検査します。"
@@ -364,10 +410,24 @@ try {
         "run",
         "--rm",
         "--mount", "type=bind,source=$InputDirectory,target=/workspace,readonly",
-        "--mount", "type=bind,source=$OutputDirectory,target=/output",
+        "--mount", "type=bind,source=$OutputDirectory,target=/output"
+    )
+    if ($null -ne $TemplateDirectory) {
+        $podmanArguments += @(
+            "--mount", "type=bind,source=$TemplateDirectory,target=/template,readonly"
+        )
+    }
+    $podmanArguments += @(
         $ImageName,
         "--dpi", [string]$Dpi,
-        "--jpeg-quality", [string]$JpegQuality,
+        "--jpeg-quality", [string]$JpegQuality
+    )
+    if ($null -ne $TemplateDirectory) {
+        $podmanArguments += @(
+            "--template", "/template/template.docx"
+        )
+    }
+    $podmanArguments += @(
         "-o", $containerOutputPath
     )
     $podmanArguments += @($PowerPointFiles.Name)
