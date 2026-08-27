@@ -51,6 +51,32 @@ param(
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = "Stop"
 
+# =========================================================
+# 管理者権限への自己昇格（ショートカット・D&D対応）
+# =========================================================
+$isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+
+if (-not $isAdmin) {
+    # 現在のスクリプトパスと基本オプション
+    $arguments = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "`"$PSCommandPath`"")
+    
+    # 渡されたパラメータ（ドラッグ＆ドロップされたパス等）を再構築して引き継ぐ
+    foreach ($key in $PSBoundParameters.Keys) {
+        $val = $PSBoundParameters[$key]
+        if ($val -is [switch]) {
+            if ($val.IsPresent) { $arguments += "-$key" }
+        } else {
+            $arguments += "-$key"
+            $arguments += "`"$val`""
+        }
+    }
+    
+    # 管理者として新しいプロセスを起動し、現在のプロセスは即終了する
+    Start-Process powershell.exe -Verb RunAs -ArgumentList $arguments
+    exit 0
+}
+# =========================================================
+
 $SupportedExtensions = @(".pptx", ".pptm")
 $ScriptDirectory = Split-Path -Parent $MyInvocation.MyCommand.Path
 $PdfExporter = Join-Path $ScriptDirectory "pptx_to_pdf.js"
@@ -595,6 +621,10 @@ try {
     if ($ExportPdf) {
         Write-Host ("PDF保存先: {0}" -f $PdfDestinationDirectory)
     }
+
+    # 成功時の画面一時停止
+    Write-Host ""
+    Read-Host "処理が正常に完了しました。Enterキーを押して終了します"
 }
 catch {
     $errorRecord = $_
@@ -630,6 +660,10 @@ catch {
     [Console]::Error.WriteLine("失敗した段階: {0}" -f $CurrentStage)
     [Console]::Error.WriteLine("エラー: {0}" -f $message)
     $ExitCode = 1
+
+    # エラー時の画面一時停止
+    Write-Host ""
+    Read-Host "エラーが発生しました。Enterキーを押して終了します"
 }
 finally {
     if (($null -ne $JobDirectory) -and
