@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import shutil
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -98,6 +99,24 @@ def get_pdf_page_count(pdf_path: Path) -> int:
         raise ValueError(f"PDFにページがありません: {pdf_path}")
     return page_count
 
+
+def render_pdf_page_to_svg(
+    pdf_path: Path,
+    page_number: int,
+    image_path: Path,
+) -> None:
+    """Save one PDF page as a SVG."""
+    subprocess.run(
+        [
+            "pdftocairo",
+            "-svg",
+            "-f", str(page_number),
+            "-l", str(page_number),
+            str(pdf_path),
+            str(image_path),
+        ],
+        check=True,
+    )
 
 def render_pdf_page_to_jpeg(
     pdf_path: Path,
@@ -786,7 +805,7 @@ def build_minutes_base(
 
             add_file_header(document, source_name)
             for slide, pdf_page_number, original_slide_number in slide_page_pairs:
-                image_path = item_temp_dir / f"slide_{original_slide_number:04d}.jpg"
+                image_path = item_temp_dir / f"slide_{original_slide_number:04d}.svg"
                 render_pdf_page_to_jpeg(
                     pdf_path,
                     pdf_page_number,
@@ -794,7 +813,7 @@ def build_minutes_base(
                     dpi=dpi,
                     jpeg_quality=jpeg_quality,
                 )
-                pad_image_to_16_9(image_path, jpeg_quality=jpeg_quality)
+                #pad_image_to_16_9(image_path, jpeg_quality=jpeg_quality)
                 add_slide_block(
                     document,
                     source_name=source_name,
