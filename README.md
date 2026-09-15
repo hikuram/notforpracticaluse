@@ -259,36 +259,57 @@ A PDF is required for every presentation because the PDF supplies the page
 image embedded into the generated DOCX. The UI accepts multiple files and pairs
 PDF/PPTX/PPTM inputs by case-insensitive basename.
 
-Place reusable DOCX templates in the `templates` directory next to `app.py`.
-The UI can select one of those templates or use a newly uploaded DOCX. A newly
-uploaded template is only added to `templates` when the user explicitly selects
-the save option.
+When `app.py` is run directly, reusable DOCX templates are read from the
+`templates` directory next to `app.py`. The directory can be overridden with
+`PPT2WORD_TEMPLATES_DIR`. `Dockerfile.streamlit` sets it to `/templates`, so the
+container keeps persistent templates completely separate from temporary source
+and output data. The UI can select one of those templates or use a newly uploaded
+DOCX. A newly uploaded template is only persisted when the user explicitly
+selects the save option.
 
-The default `Dockerfile` starts the Streamlit application directly:
-
-```bash
-podman build -t ppt2word-streamlit .
-```
-
-The previous command-line container definition is retained as `Dockerfile.cli`:
+Build the Streamlit image separately from the existing CLI image:
 
 ```bash
-podman build -f Dockerfile.cli -t ppt2word-cli .
+podman build -f Dockerfile.streamlit -t ppt2word-streamlit .
 ```
 
 For sensitive meeting materials, use a tmpfs for `/tmp` so uploaded source files,
 rendered page images, and the generated on-disk DOCX never reside on persistent
-container storage. Mount the template directory separately if reusable templates
-must survive image/container replacement:
+container storage. Persist **only** `/templates` with a bind mount or named volume:
 
 ```bash
 podman run --rm \
   -p 8501:8501 \
-  --tmpfs /tmp:rw,noexec,nosuid,size=2g \
-  --mount type=bind,source=/path/to/templates,target=/app/templates \
+  --tmpfs /tmp:rw,noexec,nosuid,nodev,size=2g \
+  --mount type=bind,source=/path/to/templates,target=/templates \
   ppt2word-streamlit
+```
+
+For a Traefik + Sablier deployment, attach the same `/templates` mount to the
+on-demand application service and keep `/tmp` as tmpfs. Configure Sablier to
+**stop** the application container when its session expires; do not use a pause
+or resource-throttling mode for this application if the goal is to discard
+sensitive working data between sessions. Stopping the container discards the
+tmpfs contents and process memory, while user-approved template uploads remain
+in `/templates`. Do not mount `/opt/ppt2word` or `/tmp` to persistent storage.
+
+A Compose service can use the same storage split, for example:
+
+```yaml
+services:
+  ppt2word:
+    image: ppt2word-streamlit
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=2g
+    volumes:
+      - ./templates:/templates
+    # Add the Traefik/Sablier labels used by your streamlit-manager here.
 ```
 
 The application uses `TemporaryDirectory` for each conversion and reads the
 finished DOCX into session memory before closing the temporary job directory.
-It does not use Streamlit caching for uploaded or generated document data.
+It does not use Streamlit caching for uploaded or generated document data. In an
+on-demand setup, stopping the container also clears the Streamlit session and its
+in-memory uploaded/generated document data. Note that Linux tmpfs pages may still
+be swapped by the host; disable swap or use encrypted swap if that is outside the
+acceptable data-retention boundary.

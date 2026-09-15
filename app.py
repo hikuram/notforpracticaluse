@@ -9,6 +9,7 @@ extraction from the PDF.
 
 from __future__ import annotations
 
+import os
 import tempfile
 from pathlib import Path
 
@@ -21,7 +22,10 @@ from ppt2word import (
 )
 
 APP_DIR = Path(__file__).resolve().parent
-TEMPLATES_DIR = APP_DIR / "templates"
+DEFAULT_TEMPLATES_DIR = APP_DIR / "templates"
+TEMPLATES_DIR = Path(
+    os.environ.get("PPT2WORD_TEMPLATES_DIR", str(DEFAULT_TEMPLATES_DIR))
+).expanduser()
 TEMPLATES_DIR.mkdir(parents=True, exist_ok=True)
 
 DOCX_MIME = (
@@ -125,7 +129,7 @@ def main() -> None:
     else:
         template_mode = "新規アップロード"
         st.info(
-            f"保存済みテンプレートがありません。{TEMPLATES_DIR.name}/ にDOCXを置くか、"
+            f"保存済みテンプレートがありません。{TEMPLATES_DIR} にDOCXを置くか、"
             "下からアップロードしてください。"
         )
 
@@ -147,7 +151,7 @@ def main() -> None:
             key="template_upload",
         )
         register_template = st.checkbox(
-            "変換成功後、このテンプレートを templates に保存する",
+            f"変換成功後、このテンプレートを {TEMPLATES_DIR} に保存する",
             value=False,
         )
 
@@ -241,7 +245,7 @@ def main() -> None:
                     )
                 except OSError as exc:
                     st.warning(
-                        "変換は完了しましたが、templates へのテンプレート保存に失敗しました: "
+                        f"変換は完了しましたが、{TEMPLATES_DIR} へのテンプレート保存に失敗しました: "
                         f"{exc}"
                     )
             else:
