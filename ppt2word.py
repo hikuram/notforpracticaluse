@@ -10,9 +10,10 @@ The source PDFs are never deleted.
 from __future__ import annotations
 
 import argparse
-import shutil
+import subprocess
 import sys
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Iterator, Sequence
 
@@ -30,6 +31,7 @@ from pptx import Presentation
 from pptx.enum.shapes import MSO_SHAPE_TYPE
 
 SUPPORTED_POWERPOINT_EXTENSIONS = {".pptx", ".pptm"}
+SUPPORTED_INPUT_EXTENSIONS = SUPPORTED_POWERPOINT_EXTENSIONS | {".pdf"}
 DEFAULT_OUTPUT_NAME = "統合議事録ベース.docx"
 DEFAULT_TEMPLATE_NAME = "header_template.docx"
 
@@ -48,6 +50,22 @@ SLIDE_NOTE_CELL_WIDTH_CM = BODY_WIDTH_CM - SLIDE_IMAGE_CELL_WIDTH_CM
 SLIDE_IMAGE_CELL_SIDE_MARGIN_CM = 0.02
 SLIDE_IMAGE_CELL_VERTICAL_MARGIN_CM = 0.02
 SLIDE_ROW_MIN_HEIGHT_CM = 6.65
+
+
+@dataclass(frozen=True)
+class SourcePair:
+    """One PDF used for rendering and its optional PowerPoint text source."""
+
+    pdf_path: Path
+    ppt_path: Path | None = None
+
+    @property
+    def source_name(self) -> str:
+        return (self.ppt_path or self.pdf_path).name
+
+    @property
+    def uses_pdf_text(self) -> bool:
+        return self.ppt_path is None
 
 
 def sanitize_xml_text(text: str) -> str:
@@ -97,6 +115,75 @@ def get_pdf_page_count(pdf_path: Path) -> int:
     if page_count <= 0:
         raise ValueError(f"PDFにページがありません: {pdf_path}")
     return page_count
+
+
+def _run_pdftotext(pdf_path: Path, *extra_args: str) -> str:
+    """Return UTF-8 text produced by Poppler's pdftotext."""
+    command = [
+        "pdftotext",
+        "-enc",
+        "UTF-8",
+        *extra_args,
+        str(pdf_path),
+        "-",
+    ]
+    try:
+        completed = subprocess.run(
+            command,
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+    except FileNotFoundError as exc:
+        raise FileNotFoundError(
+            "PDF文字列抽出に必要な pdftotext が見つかりません。"
+        ) from exc
+
+    if completed.returncode != 0:
+        detail = completed.stderr.strip() or f"終了コード {completed.returncode}"
+        raise ValueError(f"PDF文字列抽出に失敗しました: {pdf_path.name}: {detail}")
+    return completed.stdout
+
+
+def _normalize_pdf_page_text(text: str) -> str:
+    return normalize_extracted_text(text, line_break_separator="\n")
+
+
+def extract_text_from_pdf_pages(
+    pdf_path: Path,
+    *,
+    page_count: int | None = None,
+) -> list[str]:
+    """Extract searchable text from every PDF page with a single Poppler call.
+
+    Normal pdftotext output contains form-feed page separators.  A conservative
+    page-by-page fallback is used only when a producer emits an unexpected
+    stream, keeping the common path fast while preserving page alignment.
+    """
+    if page_count is None:
+        page_count = get_pdf_page_count(pdf_path)
+
+    raw_text = _run_pdftotext(pdf_path)
+    pages = raw_text.split("\f")
+    if pages and not pages[-1].strip():
+        pages.pop()
+
+    if len(pages) != page_count:
+        pages = [
+            _run_pdftotext(
+                pdf_path,
+                "-f",
+                str(page_number),
+                "-l",
+                str(page_number),
+            )
+            for page_number in range(1, page_count + 1)
+        ]
+
+    return [_normalize_pdf_page_text(page_text) for page_text in pages]
 
 
 def render_pdf_page_to_jpeg(
@@ -659,11 +746,15 @@ def add_slide_block(
     document: DocumentObject,
     *,
     source_name: str,
-    slide,
+    slide=None,
+    slide_text: str | None = None,
     image_path: Path,
     original_slide_number: int,
 ) -> None:
-    slide_text = extract_text_from_slide(slide)
+    if slide_text is None:
+        if slide is None:
+            raise ValueError("slide または slide_text のいずれかが必要です。")
+        slide_text = extract_text_from_slide(slide)
 
     slide_heading = document.add_paragraph(
         f"■ {source_name} - P.{original_slide_number}"
@@ -746,14 +837,15 @@ def add_slide_block(
     compact_paragraph(spacer)
 
 
-def build_minutes_base(
-    ppt_paths: Sequence[Path],
+def build_minutes_from_sources(
+    sources: Sequence[SourcePair],
     output_word_path: Path,
     *,
     template_path: Path,
     dpi: int = 300,
     jpeg_quality: int = 85,
     keep_images: bool = False,
+    verbose: bool = True,
 ) -> None:
     if output_word_path.resolve() == template_path.resolve():
         raise ValueError("出力先にテンプレート自身は指定できません。")
@@ -762,30 +854,54 @@ def build_minutes_base(
     configure_template_document(document)
     enable_track_revisions(document)
 
-    temp_parent = output_word_path.parent
-    temp_parent.mkdir(parents=True, exist_ok=True)
-    temp_path = Path(tempfile.mkdtemp(prefix="_ppt_temp_v5_", dir=temp_parent))
+    output_word_path.parent.mkdir(parents=True, exist_ok=True)
+    if keep_images:
+        temp_path = Path(
+            tempfile.mkdtemp(prefix="_ppt_temp_v6_", dir=output_word_path.parent)
+        )
+        temp_context = None
+    else:
+        temp_context = tempfile.TemporaryDirectory(prefix="_ppt_temp_v6_")
+        temp_path = Path(temp_context.name)
+
+    def log(message: str) -> None:
+        if verbose:
+            print(message)
 
     try:
-        for file_index, ppt_path in enumerate(ppt_paths, start=1):
-            source_name = ppt_path.name
-            pdf_path = find_sibling_pdf(ppt_path)
-            item_temp_dir = temp_path / f"{file_index:03d}_{ppt_path.stem}"
+        for file_index, source in enumerate(sources, start=1):
+            source_name = source.source_name
+            pdf_path = source.pdf_path
+            item_temp_dir = temp_path / f"{file_index:03d}"
             item_temp_dir.mkdir(parents=True, exist_ok=True)
 
-            print(f"\n処理中: {source_name}")
-            print(f"  PDF: {pdf_path.name}")
-
-            presentation = Presentation(str(ppt_path))
+            log(f"\n処理中: {source_name}")
+            log(f"  PDF: {pdf_path.name}")
             pdf_page_count = get_pdf_page_count(pdf_path)
-            slide_page_pairs = resolve_slide_page_pairs(
-                presentation,
-                pdf_page_count,
-                source_name,
-            )
 
             add_file_header(document, source_name)
-            for slide, pdf_page_number, original_slide_number in slide_page_pairs:
+            if source.ppt_path is not None:
+                presentation = Presentation(str(source.ppt_path))
+                page_entries = [
+                    (slide, None, pdf_page_number, original_slide_number)
+                    for slide, pdf_page_number, original_slide_number
+                    in resolve_slide_page_pairs(
+                        presentation,
+                        pdf_page_count,
+                        source_name,
+                    )
+                ]
+            else:
+                pdf_page_texts = extract_text_from_pdf_pages(
+                    pdf_path,
+                    page_count=pdf_page_count,
+                )
+                page_entries = [
+                    (None, pdf_page_texts[page_number - 1], page_number, page_number)
+                    for page_number in range(1, pdf_page_count + 1)
+                ]
+
+            for slide, slide_text, pdf_page_number, original_slide_number in page_entries:
                 image_path = item_temp_dir / f"slide_{original_slide_number:04d}.jpg"
                 render_pdf_page_to_jpeg(
                     pdf_path,
@@ -799,6 +915,7 @@ def build_minutes_base(
                     document,
                     source_name=source_name,
                     slide=slide,
+                    slide_text=slide_text,
                     image_path=image_path,
                     original_slide_number=original_slide_number,
                 )
@@ -812,15 +929,40 @@ def build_minutes_base(
             set_contextual_spacing(paragraph._p)
             disable_snap_to_grid(paragraph._p)
 
-        print(f"\n保存中: {output_word_path.name}")
+        log(f"\n保存中: {output_word_path.name}")
         document.save(str(output_word_path))
     finally:
         if keep_images:
-            print(f"中間画像を保持しました: {temp_path}")
-        else:
-            shutil.rmtree(temp_path, ignore_errors=True)
+            log(f"中間画像を保持しました: {temp_path}")
+        elif temp_context is not None:
+            temp_context.cleanup()
 
-    print("完了: 統合議事録ベースを生成しました。")
+    log("完了: 統合議事録ベースを生成しました。")
+
+
+def build_minutes_base(
+    ppt_paths: Sequence[Path],
+    output_word_path: Path,
+    *,
+    template_path: Path,
+    dpi: int = 300,
+    jpeg_quality: int = 85,
+    keep_images: bool = False,
+) -> None:
+    """Backward-compatible PowerPoint-first entry point used by the CLI."""
+    sources = [
+        SourcePair(pdf_path=find_sibling_pdf(ppt_path), ppt_path=ppt_path)
+        for ppt_path in ppt_paths
+    ]
+    build_minutes_from_sources(
+        sources,
+        output_word_path,
+        template_path=template_path,
+        dpi=dpi,
+        jpeg_quality=jpeg_quality,
+        keep_images=keep_images,
+        verbose=True,
+    )
 
 
 def discover_powerpoint_files(directory: Path) -> list[Path]:
@@ -832,6 +974,49 @@ def discover_powerpoint_files(directory: Path) -> list[Path]:
         ),
         key=lambda path: path.name.casefold(),
     )
+
+
+def pair_source_files(paths: Sequence[Path]) -> list[SourcePair]:
+    """Pair uploaded PDFs and PowerPoint files by case-insensitive stem.
+
+    Input order is preserved by the first occurrence of each stem.  A PDF is
+    mandatory because it supplies the page image.  A matching PPTX/PPTM is
+    optional and, when present, is always preferred as the text source.
+    """
+    groups: dict[str, dict[str, Path | None]] = {}
+    order: list[str] = []
+
+    for raw_path in paths:
+        path = Path(raw_path)
+        suffix = path.suffix.casefold()
+        if suffix not in SUPPORTED_INPUT_EXTENSIONS:
+            raise ValueError(f"未対応の入力形式です: {path.name}")
+
+        key = path.stem.casefold()
+        if key not in groups:
+            groups[key] = {"pdf": None, "ppt": None}
+            order.append(key)
+
+        slot = "pdf" if suffix == ".pdf" else "ppt"
+        previous = groups[key][slot]
+        if previous is not None:
+            raise ValueError(
+                f"同じ資料名に複数の{slot.upper()}候補があります: "
+                f"{previous.name}, {path.name}"
+            )
+        groups[key][slot] = path
+
+    sources: list[SourcePair] = []
+    for key in order:
+        pdf_path = groups[key]["pdf"]
+        ppt_path = groups[key]["ppt"]
+        if pdf_path is None:
+            assert ppt_path is not None
+            raise FileNotFoundError(
+                f"対応するPDFがありません: {ppt_path.name} -> {ppt_path.stem}.pdf"
+            )
+        sources.append(SourcePair(pdf_path=pdf_path, ppt_path=ppt_path))
+    return sources
 
 
 def validate_inputs(raw_paths: Iterable[str], current_directory: Path) -> list[Path]:

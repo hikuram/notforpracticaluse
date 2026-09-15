@@ -243,3 +243,52 @@ The sample template included in this repository is intentionally generic so that
 ## Design notes
 
 `design_specs_jap.md` contains the current design notes in Japanese. The implementation and this README are the primary references for public usage.
+
+## Streamlit application
+
+`app.py` provides a browser UI that does not require Microsoft Office on the
+server. Users upload PDFs exported in their own Office-capable environment and
+may also upload the matching PPTX/PPTM files.
+
+Text extraction priority is:
+
+1. matching PPTX/PPTM via `python-pptx`
+2. PDF text via Poppler `pdftotext` when the PowerPoint source is absent
+
+A PDF is required for every presentation because the PDF supplies the page
+image embedded into the generated DOCX. The UI accepts multiple files and pairs
+PDF/PPTX/PPTM inputs by case-insensitive basename.
+
+Place reusable DOCX templates in the `templates` directory next to `app.py`.
+The UI can select one of those templates or use a newly uploaded DOCX. A newly
+uploaded template is only added to `templates` when the user explicitly selects
+the save option.
+
+The default `Dockerfile` starts the Streamlit application directly:
+
+```bash
+podman build -t ppt2word-streamlit .
+```
+
+The previous command-line container definition is retained as `Dockerfile.cli`:
+
+```bash
+podman build -f Dockerfile.cli -t ppt2word-cli .
+```
+
+For sensitive meeting materials, use a tmpfs for `/tmp` so uploaded source files,
+rendered page images, and the generated on-disk DOCX never reside on persistent
+container storage. Mount the template directory separately if reusable templates
+must survive image/container replacement:
+
+```bash
+podman run --rm \
+  -p 8501:8501 \
+  --tmpfs /tmp:rw,noexec,nosuid,size=2g \
+  --mount type=bind,source=/path/to/templates,target=/app/templates \
+  ppt2word-streamlit
+```
+
+The application uses `TemporaryDirectory` for each conversion and reads the
+finished DOCX into session memory before closing the temporary job directory.
+It does not use Streamlit caching for uploaded or generated document data.

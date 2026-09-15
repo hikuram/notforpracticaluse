@@ -169,5 +169,60 @@ class PdfMappingTests(unittest.TestCase):
             self.assertEqual(12, ppt2word.get_pdf_page_count(Path("sample.pdf")))
 
 
+class PdfTextExtractionTests(unittest.TestCase):
+    def test_splits_single_pdftotext_run_into_pages(self):
+        with patch.object(
+            ppt2word,
+            "_run_pdftotext",
+            return_value="First page\n\fSecond page\n\f",
+        ) as run_pdftotext:
+            pages = ppt2word.extract_text_from_pdf_pages(
+                Path("sample.pdf"),
+                page_count=2,
+            )
+
+        self.assertEqual(["First page", "Second page"], pages)
+        run_pdftotext.assert_called_once_with(Path("sample.pdf"))
+
+    def test_falls_back_to_page_by_page_when_page_breaks_are_unexpected(self):
+        with patch.object(
+            ppt2word,
+            "_run_pdftotext",
+            side_effect=["combined without separators", "Page one\f", "Page two\f"],
+        ) as run_pdftotext:
+            pages = ppt2word.extract_text_from_pdf_pages(
+                Path("sample.pdf"),
+                page_count=2,
+            )
+
+        self.assertEqual(["Page one", "Page two"], pages)
+        self.assertEqual(3, run_pdftotext.call_count)
+
+
+class SourcePairingTests(unittest.TestCase):
+    def test_prefers_powerpoint_text_when_pdf_and_powerpoint_are_both_present(self):
+        sources = ppt2word.pair_source_files(
+            [Path("A.pdf"), Path("A.pptx"), Path("B.pdf")]
+        )
+
+        self.assertEqual(2, len(sources))
+        self.assertEqual(Path("A.pdf"), sources[0].pdf_path)
+        self.assertEqual(Path("A.pptx"), sources[0].ppt_path)
+        self.assertFalse(sources[0].uses_pdf_text)
+        self.assertEqual(Path("B.pdf"), sources[1].pdf_path)
+        self.assertIsNone(sources[1].ppt_path)
+        self.assertTrue(sources[1].uses_pdf_text)
+
+    def test_requires_pdf_for_every_powerpoint(self):
+        with self.assertRaises(FileNotFoundError):
+            ppt2word.pair_source_files([Path("A.pptx")])
+
+    def test_rejects_multiple_powerpoint_candidates_for_same_stem(self):
+        with self.assertRaises(ValueError):
+            ppt2word.pair_source_files(
+                [Path("A.pdf"), Path("A.pptx"), Path("A.pptm")]
+            )
+
+
 if __name__ == "__main__":
     unittest.main()
